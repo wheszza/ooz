@@ -214,6 +214,20 @@ uint32 BSF(uint32 x) {
 // Read more bytes to make sure we always have at least 24 bits in |bits|.
 void BitReader_Refill(BitReader *bits) {
   assert(bits->bitpos <= 24);
+  int bitpos = bits->bitpos;
+  if (bitpos <= 0)
+    return;
+  if (bits->p_end - bits->p >= 4) {
+    // Branchless: deposit the same ceil(bitpos/8) bytes the loop would,
+    // masking off low-bit leakage from the extra loaded byte (callers like
+    // ReadDistance rotate the full word, so early bits are not harmless).
+    int k = (bitpos + 7) >> 3;
+    uint32 w = _byteswap_ulong(*(uint32 *)bits->p) >> (24 - bitpos);
+    bits->bits |= w & ~((1u << (bitpos - 8 * k + 8)) - 1);
+    bits->p += k;
+    bits->bitpos = bitpos - 8 * k;
+    return;
+  }
   while (bits->bitpos > 0) {
     bits->bits |= (bits->p < bits->p_end ? *bits->p : 0) << bits->bitpos;
     bits->bitpos -= 8;
@@ -225,6 +239,18 @@ void BitReader_Refill(BitReader *bits) {
 // used when reading backwards.
 void BitReader_RefillBackwards(BitReader *bits) {
   assert(bits->bitpos <= 24);
+  int bitpos = bits->bitpos;
+  if (bitpos <= 0)
+    return;
+  if (bits->p - bits->p_end >= 4) {
+    // Little-endian load of p[-4..0) already has p[-1] in the top byte.
+    int k = (bitpos + 7) >> 3;
+    uint32 w = *(uint32 *)(bits->p - 4) >> (24 - bitpos);
+    bits->bits |= w & ~((1u << (bitpos - 8 * k + 8)) - 1);
+    bits->p -= k;
+    bits->bitpos = bitpos - 8 * k;
+    return;
+  }
   while (bits->bitpos > 0) {
     bits->p--;
     bits->bits |= (bits->p >= bits->p_end ? *bits->p : 0) << bits->bitpos;
@@ -449,6 +475,8 @@ int Log2RoundUp(uint32 v) {
 
 #define COPY_64_ADD(d, s, t) _mm_storel_epi64((__m128i *)(d), _mm_add_epi8(_mm_loadl_epi64((__m128i *)(s)), _mm_loadl_epi64((__m128i *)(t))))
 
+#define COPY_128(d, s) _mm_storeu_si128((__m128i *)(d), _mm_loadu_si128((const __m128i *)(s)))
+
 KrakenDecoder *Kraken_Create() {
   size_t scratch_size = 0x6C000;
   size_t memory_needed = sizeof(KrakenDecoder) + scratch_size;
@@ -632,6 +660,72 @@ bool Kraken_DecodeBytesCore(HuffReader *hr, HuffRevLut *lut) {
 
   if (src > src_mid)
     return false;
+
+  // 64-bit fast path: one refill feeds 5 symbols per stream (5 x 11-bit max
+  // codes = 55 <= 56 refilled bits), 15 symbols per iteration across the 3
+  // interleaved streams. Exits by normalizing to the same canonical
+  // (ptr, bits, bitpos<=7) state the original 32-bit loops expect.
+  if (hr->src_end - src_mid >= 8 && dst_end - dst >= 15) {
+    dst_end -= 14;
+    src_end -= 8;
+
+    uint64 bits0 = src_bits, bits1 = src_end_bits, bits2 = src_mid_bits;
+    int bp0 = src_bitpos, bp1 = src_end_bitpos, bp2 = src_mid_bitpos;
+    int k64, n64;
+
+    while (dst < dst_end && src <= src_mid && src_mid <= src_end) {
+      bits0 |= *(uint64 *)src << bp0;
+      src += (63 - bp0) >> 3;
+
+      bits1 |= _byteswap_uint64(*(uint64 *)src_end) << bp1;
+      src_end -= (63 - bp1) >> 3;
+
+      bits2 |= *(uint64 *)src_mid << bp2;
+      src_mid += (63 - bp2) >> 3;
+
+      bp0 |= 0x38;
+      bp1 |= 0x38;
+      bp2 |= 0x38;
+
+#define OOZ_HUFF_STEP64(idx, bits, bp)                  \
+      k64 = (int)(bits & 0x7FF);                        \
+      n64 = lut->bits2len[k64];                         \
+      bits >>= n64;                                     \
+      bp -= n64;                                        \
+      dst[idx] = lut->bits2sym[k64];
+
+      OOZ_HUFF_STEP64(0, bits0, bp0)
+      OOZ_HUFF_STEP64(1, bits1, bp1)
+      OOZ_HUFF_STEP64(2, bits2, bp2)
+      OOZ_HUFF_STEP64(3, bits0, bp0)
+      OOZ_HUFF_STEP64(4, bits1, bp1)
+      OOZ_HUFF_STEP64(5, bits2, bp2)
+      OOZ_HUFF_STEP64(6, bits0, bp0)
+      OOZ_HUFF_STEP64(7, bits1, bp1)
+      OOZ_HUFF_STEP64(8, bits2, bp2)
+      OOZ_HUFF_STEP64(9, bits0, bp0)
+      OOZ_HUFF_STEP64(10, bits1, bp1)
+      OOZ_HUFF_STEP64(11, bits2, bp2)
+      OOZ_HUFF_STEP64(12, bits0, bp0)
+      OOZ_HUFF_STEP64(13, bits1, bp1)
+      OOZ_HUFF_STEP64(14, bits2, bp2)
+#undef OOZ_HUFF_STEP64
+      dst += 15;
+    }
+    dst_end += 14;
+
+    src -= bp0 >> 3;
+    src_bits = (uint32)bits0;
+    src_bitpos = bp0 & 7;
+
+    src_end += 8 + (bp1 >> 3);
+    src_end_bits = (uint32)bits1;
+    src_end_bitpos = bp1 & 7;
+
+    src_mid -= bp2 >> 3;
+    src_mid_bits = (uint32)bits2;
+    src_mid_bitpos = bp2 & 7;
+  }
 
   if (hr->src_end - src_mid >= 4 && dst_end - dst >= 6) {
     dst_end -= 5;
@@ -2581,23 +2675,21 @@ bool Kraken_ProcessLzRuns_Type1(KrakenLzTable *lzt, byte *dst, byte *dst_end, by
     uint32 next_long_length = *len_stream;
     const int *next_len_stream = len_stream + 1;
 
-    len_stream = (litlen == 3) ? next_len_stream : len_stream; 
+    len_stream = (litlen == 3) ? next_len_stream : len_stream;
     litlen = (litlen == 3) ? next_long_length : litlen;
     recent_offs[6] = *offs_stream;
 
-    COPY_64(dst, lit_stream);
-    if (litlen > 8) {
-      COPY_64(dst + 8, lit_stream + 8);
-      if (litlen > 16) {
-        COPY_64(dst + 16, lit_stream + 16);
-        if (litlen > 24) {
-          do {
-            COPY_64(dst + 24, lit_stream + 24);
-            litlen -= 8;
-            dst += 8;
-            lit_stream += 8;
-          } while (litlen > 24);
-        }
+    // literals never alias dst, so 16-byte blocks are always safe
+    COPY_128(dst, lit_stream);
+    if (litlen > 16) {
+      COPY_128(dst + 16, lit_stream + 16);
+      if (litlen > 32) {
+        do {
+          COPY_128(dst + 32, lit_stream + 32);
+          litlen -= 16;
+          dst += 16;
+          lit_stream += 16;
+        } while (litlen > 32);
       }
     }
     dst += litlen;
@@ -2615,24 +2707,53 @@ bool Kraken_ProcessLzRuns_Type1(KrakenLzTable *lzt, byte *dst, byte *dst_end, by
       return false; // offset out of bounds
 
     copyfrom = dst + offset;
+    // Kraken guarantees offset <= -8; a copy block of C bytes is safe to
+    // step sequentially iff -offset >= C, so pick the widest legal block.
     if (matchlen != 15) {
-      COPY_64(dst, copyfrom);
-      COPY_64(dst + 8, copyfrom + 8);
+      if (offset <= -16) {
+        COPY_128(dst, copyfrom);
+      } else {
+        COPY_64(dst, copyfrom);
+        COPY_64(dst + 8, copyfrom + 8);
+      }
       dst += matchlen + 2;
     } else {
       matchlen = 14 + *len_stream++; // why is the value not 16 here, the above case copies up to 16 bytes.
       if ((uintptr_t)matchlen > (uintptr_t)(dst_end - dst))
         return false; // copy length out of bounds
-      COPY_64(dst, copyfrom);
-      COPY_64(dst + 8, copyfrom + 8);
-      COPY_64(dst + 16, copyfrom + 16);
-      do {
-        COPY_64(dst + 24, copyfrom + 24);
-        matchlen -= 8;
-        dst += 8;
-        copyfrom += 8;
-      } while (matchlen > 24);
-      dst += matchlen;
+      if (offset <= -32) {
+        COPY_128(dst, copyfrom);
+        COPY_128(dst + 16, copyfrom + 16);
+        while (matchlen > 32) {
+          COPY_128(dst + 32, copyfrom + 32);
+          COPY_128(dst + 48, copyfrom + 48);
+          matchlen -= 32;
+          dst += 32;
+          copyfrom += 32;
+        }
+        dst += matchlen;
+      } else if (offset <= -16) {
+        COPY_128(dst, copyfrom);
+        COPY_128(dst + 16, copyfrom + 16);
+        while (matchlen > 32) {
+          COPY_128(dst + 32, copyfrom + 32);
+          matchlen -= 16;
+          dst += 16;
+          copyfrom += 16;
+        }
+        dst += matchlen;
+      } else {
+        COPY_64(dst, copyfrom);
+        COPY_64(dst + 8, copyfrom + 8);
+        COPY_64(dst + 16, copyfrom + 16);
+        do {
+          COPY_64(dst + 24, copyfrom + 24);
+          matchlen -= 8;
+          dst += 8;
+          copyfrom += 8;
+        } while (matchlen > 24);
+        dst += matchlen;
+      }
     }
   }
 
