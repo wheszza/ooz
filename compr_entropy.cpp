@@ -783,7 +783,7 @@ void HuffBuilder::CalcNumsymsEtc() {
     min_len++;
   min_code_len_ = min_len;
 
-  int max_len = 31;
+  int max_len = kMaxCodeLen - 1;
   while (!numsyms_of_len_[max_len])
     max_len--;
   max_code_len_ = max_len;
