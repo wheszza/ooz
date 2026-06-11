@@ -229,7 +229,9 @@ void BitReader_Refill(BitReader *bits) {
     return;
   }
   while (bits->bitpos > 0) {
-    bits->bits |= (bits->p < bits->p_end ? *bits->p : 0) << bits->bitpos;
+    // cast before shifting: byte << 24 as a promoted int overflows into
+    // the sign bit, which is undefined behavior pre-C++20
+    bits->bits |= (uint32)(bits->p < bits->p_end ? *bits->p : 0) << bits->bitpos;
     bits->bitpos -= 8;
     bits->p++;
   }
@@ -253,7 +255,7 @@ void BitReader_RefillBackwards(BitReader *bits) {
   }
   while (bits->bitpos > 0) {
     bits->p--;
-    bits->bits |= (bits->p >= bits->p_end ? *bits->p : 0) << bits->bitpos;
+    bits->bits |= (uint32)(bits->p >= bits->p_end ? *bits->p : 0) << bits->bitpos;
     bits->bitpos -= 8;
   }
 }
