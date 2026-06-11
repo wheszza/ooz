@@ -92,7 +92,10 @@ static uint8 *VarLenWriteLength(uint8 *dst, unsigned int value, int A, int B) {
 
 MatchLenStorage *MatchLenStorage::Create(int entries, float avg_bytes) {
   MatchLenStorage *mls = new MatchLenStorage;
-  mls->byte_buffer.resize((int)(entries * avg_bytes));
+  // +32: ExtractLaoFromMls parses with a fixed 32-byte lookahead window,
+  // so the buffer needs that much (zero-initialized) slack after the
+  // last record or the tail reads land in uninitialized memory.
+  mls->byte_buffer.resize((int)(entries * avg_bytes) + 32);
   mls->offset2pos.resize(entries);
   mls->byte_buffer_use = 1;
   mls->window_base = NULL;
@@ -108,7 +111,7 @@ void MatchLenStorage_InsertMatches(MatchLenStorage *mls, int at_offset, LengthAn
     return;
   mls->offset2pos[at_offset] = mls->byte_buffer_use;
 
-  int needed_bytes = mls->byte_buffer_use + 16 * num_lao + 2;
+  int needed_bytes = mls->byte_buffer_use + 16 * num_lao + 2 + 32;
   if (needed_bytes >= mls->byte_buffer.size())
     mls->byte_buffer.resize(needed_bytes);
 
