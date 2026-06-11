@@ -1385,13 +1385,16 @@ int Kraken_DecodeMultiArray(const uint8 *src, const uint8 *src_end,
  
   if (Q & 0x8000) {
     int size_out;
-    int n = Kraken_DecodeBytes(&interval_indexes, src, src_end, &size_out, num_indexes, false, scratch_cur, scratch_end);
+    uint8 *interval_indexes_dec = interval_indexes;
+    int n = Kraken_DecodeBytes(&interval_indexes_dec, src, src_end, &size_out, num_indexes, false, scratch_cur, scratch_end);
     if (n < 0 || size_out != num_indexes)
       return -1;
     src += n;
 
+    // Unpack into the reserved scratch block, not in place: for a stored
+    // (type 0) array interval_indexes_dec aliases the const src buffer.
     for (int i = 0; i < num_indexes; i++) {
-      int t = interval_indexes[i];
+      int t = interval_indexes_dec[i];
       interval_lenlog2[i] = t >> 4;
       interval_indexes[i] = t & 0xF;
     }
