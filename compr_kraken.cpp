@@ -478,7 +478,11 @@ static void KrakEncLz_Init(KrakEncLz *kl, LzTemp *lztemp, int src_len, const uin
   kl->src_ptr = src_base;
   kl->src_len = src_len;
 
-  size_t nlits = src_len + 8;
+  // +16: SubtractBytesUnsafe writes in 16-byte blocks plus a trailing
+  // 8-byte store and can overshoot len by up to 15 bytes; the previous
+  // +8 slack let the final call scribble past this region into the next
+  // array in the arena below.
+  size_t nlits = src_len + 16;
   size_t ntokens = src_len / 2 + 8;
   size_t nu8offs = src_len / 3;
   size_t nu32offs = src_len / 3;
