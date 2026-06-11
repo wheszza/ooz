@@ -32,7 +32,7 @@ static inline uint32_t _rotl(uint32_t x, int n) {
 }
 
 #if defined(__x86_64__) || defined(__i386__)
-#include <xmmintrin.h>
+#include <emmintrin.h>   // SSE2: the codec uses _mm_*_si128 and friends
 #else
 #include "sse2neon.h"
 #endif
