@@ -4252,26 +4252,38 @@ bool Kraken_DecodeStep(struct KrakenDecoder *dec,
   return true;
 }
   
-int Kraken_Decompress(const byte *src, size_t src_len, byte *dst, size_t dst_len) {
-  KrakenDecoder *dec = Kraken_Create();
+// Decompress with a caller-owned decoder, so the ~440KB decoder + scratch
+// allocation can be reused across calls. One Create/Destroy per stream
+// costs an mmap/munmap round trip and refaulting the scratch pages on
+// allocators like musl (measured 11.7K page faults/s on a HarmonyOS
+// device while decoding a corpus of small files).
+int Kraken_DecompressWithDecoder(KrakenDecoder *dec, const byte *src, size_t src_len, byte *dst, size_t dst_len) {
+  byte *scratch = dec->scratch;
+  size_t scratch_size = dec->scratch_size;
+  memset(dec, 0, sizeof(KrakenDecoder));
+  dec->scratch = scratch;
+  dec->scratch_size = scratch_size;
   int offset = 0;
   while (dst_len != 0) {
     if (!Kraken_DecodeStep(dec, dst, offset, dst_len, src, src_len))
-      goto FAIL;
+      return -1;
     if (dec->src_used == 0)
-      goto FAIL;
+      return -1;
     src += dec->src_used;
     src_len -= dec->src_used;
     dst_len -= dec->dst_used;
     offset += dec->dst_used;
   }
   if (src_len != 0)
-    goto FAIL;
+    return -1;
+  return offset;
+}
+
+int Kraken_Decompress(const byte *src, size_t src_len, byte *dst, size_t dst_len) {
+  KrakenDecoder *dec = Kraken_Create();
+  int offset = Kraken_DecompressWithDecoder(dec, src, src_len, dst, dst_len);
   Kraken_Destroy(dec);
   return offset;
-FAIL:
-  Kraken_Destroy(dec);
-  return -1;
 }
 
 // The decompressor will write outside of the target buffer.
