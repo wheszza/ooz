@@ -4288,12 +4288,15 @@ bool Verify(const char *filename, uint8 *output, int outbytes, const char *curfi
 }
 
 #ifndef _MSC_VER
+#include <time.h>
 typedef uint64_t LARGE_INTEGER;
 void QueryPerformanceCounter(LARGE_INTEGER *a) {
-  *a = 0;
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  *a = (uint64_t)ts.tv_sec * 1000000000ull + ts.tv_nsec;
 }
 void QueryPerformanceFrequency(LARGE_INTEGER *a) {
-  *a = 1;
+  *a = 1000000000ull;
 }
 #define WINAPI
 typedef void* HINSTANCE;
