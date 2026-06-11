@@ -181,7 +181,8 @@ int CompressQuantum(LzCoder *coder, LzTemp *lztemp, MatchLenStorage *mls,
       if (AreAllBytesEqual(src, round_bytes)) {
         float memset_cost = kInvalidCost;
         int n = EncodeArrayU8_Memset(dst, dst_end, src, round_bytes, coder->entropy_opts, coder->speed_tradeoff, coder->platforms, &memset_cost);
-        src += round_bytes;
+        // src advances at the bottom of the loop; advancing it here too made the
+        // encoder skip the chunk after an all-equal chunk within the same quantum.
         dst += n;
         total_cost += memset_cost;
       } else {
